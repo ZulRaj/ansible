@@ -1,0 +1,16 @@
+ssh-keygen -t ed25519
+ssh-add-id -i publickeyfilename user@serverip
+git config --global user.email ""
+git config --global user.name ""
+git init
+git clone gitrepositiry
+git add .
+git add filename
+git rm filename
+git commit -m
+git push origin main
+git pull origin main
+apt install ansible
+ansible all --key-file -i "privatekeypath" -m ping
+
+
