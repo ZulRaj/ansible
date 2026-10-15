@@ -12,5 +12,7 @@ git push origin main
 git pull origin main
 apt install ansible
 ansible all --key-file -i "privatekeypath" -m ping
-
-
+ansible all -m ping
+ansible all --list-hosts
+ansible all -m gather_facts
+ansible all -m gather_facts --limit machine2@192.168.84.133
