@@ -1,21 +1,22 @@
-# Troubleshooting Ansible Become Timeout on Ubuntu 26.04
+# Ubuntu 26.04: Ansible Privilege Escalation Issue
 
 ## Overview
 
-This document describes how I diagnosed and resolved an Ansible privilege-escalation issue when managing an Ubuntu 26.04 server from an Ansible control node.
+This document describes how I diagnosed and resolved an Ansible privilege-escalation issue when managing an Ubuntu 26.04 server.
 
-**Environment**
+The issue occurred when Ansible attempted to execute commands with elevated privileges using `--become`. SSH connectivity and ordinary Ansible commands worked, but privilege escalation timed out while waiting for the sudo password prompt.
 
-- **Control node:** Ubuntu 26.04
+### Environment
+
+- **Control node:** Ubuntu 26.04 (`machine1`)
 - **Managed host:** Ubuntu 26.04 (`machine2`)
 - **Second managed host:** AlmaLinux 10 (`machine3`)
 - **Ansible Core:** 2.20.1
-- **Python on control node:** 3.14.4
-- **Sudo implementation on Ubuntu:** `sudo-rs 0.2.13-0ubuntu1.2`
+- **Sudo implementation on machine2:** `sudo-rs 0.2.13-0ubuntu1.2`
 
-## 1. The problem
+## 1. The Problem
 
-SSH connectivity and ordinary Ansible commands worked successfully. However, commands requiring privilege escalation with `--become` failed.
+Ansible could connect to the managed host and execute commands without privilege escalation.
 
 For example:
 
@@ -23,33 +24,33 @@ For example:
 ansible 'machine2@192.168.84.133' -m ping
 ```
 
-The command succeeded without privilege escalation.
+This command succeeded.
 
-However, running:
+However, adding `--become` caused the task to fail:
 
 ```bash
 ansible 'machine2@192.168.84.133' -m ping --become
 ```
 
-produced the following error:
+The error was:
 
 ```text
 Task failed: Timeout (12s) waiting for privilege escalation prompt
 ```
 
-The same problem occurred when using `--ask-become-pass`.
+The same problem occurred when I used `--ask-become-pass` to enter the sudo password interactively.
 
-## 2. Troubleshooting steps
+## 2. Troubleshooting Steps
 
 ### Step 1: Verify SSH connectivity
 
-I confirmed that Ansible could connect to the managed host and execute the ping module without privilege escalation.
+I confirmed that Ansible could connect to `machine2` and run the ping module without privilege escalation.
 
 This established that basic SSH connectivity was working.
 
 ### Step 2: Verify sudo manually
 
-I connected to the managed host and executed:
+I connected to `machine2` and ran:
 
 ```bash
 sudo whoami
@@ -63,18 +64,18 @@ root
 
 This confirmed that manual sudo authentication worked.
 
-### Step 3: Test the sudo prompt
+### Step 3: Test the sudo password prompt
 
-I tested sudo with a custom prompt:
+I tested sudo using a custom prompt:
 
 ```bash
 sudo -k
 sudo -S -p "TEST-PROMPT:" -u root whoami
 ```
 
-The command successfully authenticated and returned `root`.
+The command succeeded.
 
-I also tested a command using an Ansible-style prompt:
+I also tested a command using an Ansible-style password prompt:
 
 ```bash
 sudo -k
@@ -82,13 +83,13 @@ sudo -S -p "[sudo via ansible, key=testkey] password:" \
   -u root /bin/sh -c 'echo BECOME-SUCCESS-testkey; whoami'
 ```
 
-This worked manually as well.
+This also succeeded manually and returned `root`.
 
-Therefore, the sudo executable could accept the password and execute the command in a manual test, even though Ansible's privilege-escalation process was failing.
+Therefore, sudo could accept the password and execute the command in a manual test, even though Ansible's privilege-escalation process was failing.
 
 ### Step 4: Inspect the sudo logs
 
-On the managed host, I monitored sudo logs using:
+On `machine2`, I monitored the sudo logs:
 
 ```bash
 sudo journalctl -f _COMM=sudo
@@ -105,33 +106,33 @@ These messages indicated that a sudo authentication attempt failed because a usa
 
 ### Step 5: Check the sudo implementation
 
-I ran:
+I checked the installed sudo implementation:
 
 ```bash
 sudo --version
 ```
 
-The output identified the implementation as:
+The output identified it as:
 
 ```text
 sudo-rs 0.2.13-0ubuntu1.2
 ```
 
-The managed host also had the traditional sudo executable available at:
-
-```text
-/usr/bin/sudo.ws
-```
-
-I verified its existence from the control node:
+I then checked whether the traditional sudo executable was available:
 
 ```bash
 ssh machine2@192.168.84.133 'ls -l /usr/bin/sudo.ws'
 ```
 
+The executable existed:
+
+```text
+-rwsr-xr-x 1 root root 282080 Oct 6 13:13 /usr/bin/sudo.ws
+```
+
 ### Step 6: Test an alternative sudo executable
 
-Rather than changing the inventory or repeatedly testing passwords, I instructed Ansible to use the traditional sudo executable directly:
+To isolate the issue, I instructed Ansible to use `/usr/bin/sudo.ws` directly without changing the inventory:
 
 ```bash
 ansible 'machine2@192.168.84.133' \
@@ -143,31 +144,19 @@ ansible 'machine2@192.168.84.133' \
 
 **Result: The command succeeded.**
 
-This isolated the problem to the interaction between Ansible's privilege-escalation mechanism and the default sudo implementation, rather than basic SSH connectivity or the user's sudo permissions.
+This confirmed that using the traditional sudo executable resolved the privilege-escalation failure in this environment.
 
-## 3. Permanent solution
+## 3. Solution: Configure the Ansible Inventory
 
-I changed the default sudo alternative on the managed Ubuntu host to use the traditional sudo implementation.
+Instead of changing the default sudo implementation on `machine2`, I configured Ansible to use `/usr/bin/sudo.ws` for this host.
 
-First, I checked the available alternatives:
+I added `ansible_become_exe` to the existing inventory entry:
 
-```bash
-sudo update-alternatives --display sudo
+```ini
+machine2@192.168.84.133 ansible_become_exe=/usr/bin/sudo.ws
 ```
 
-Then I selected the traditional sudo executable:
-
-```bash
-sudo update-alternatives --set sudo /usr/bin/sudo.ws
-```
-
-I verified the change with:
-
-```bash
-sudo --version
-```
-
-After switching the default, I returned to the Ansible control node and tested the original command:
+I then tested privilege escalation:
 
 ```bash
 ansible 'machine2@192.168.84.133' \
@@ -176,43 +165,71 @@ ansible 'machine2@192.168.84.133' \
   --ask-become-pass
 ```
 
-**Result: Ansible privilege escalation worked successfully without the explicit `ansible_become_exe` override.**
+**Result: The command succeeded without needing the command-line override.**
 
-## 4. Alternative solution: Configure Ansible per host
+This was the solution used to resolve the issue. It did not require changing the system-wide default sudo implementation on the managed host.
 
-If changing the system-wide sudo default is undesirable, Ansible can instead be configured to use the working executable for this host.
+## 4. Alternative Solution: Change the Default Sudo Alternative
 
-For example, in the inventory:
+Another option is to change the default sudo alternative on the managed Ubuntu host. This makes the traditional sudo executable the default for system-wide use.
 
-```ini
-machine2@192.168.84.133 ansible_become_exe=/usr/bin/sudo.ws
+First, inspect the available alternatives on `machine2`:
+
+```bash
+sudo update-alternatives --display sudo
 ```
 
-This approach limits the change to Ansible's handling of that host and leaves the system-wide default unchanged.
+If `/usr/bin/sudo.ws` is listed as an available alternative, select it:
 
-## 5. Rollback
+```bash
+sudo update-alternatives --set sudo /usr/bin/sudo.ws
+```
 
-To restore the system's automatically selected sudo alternative, run this on the managed host:
+Verify the change:
+
+```bash
+sudo --version
+```
+
+Then return to `machine1` and test Ansible without specifying `ansible_become_exe`:
+
+```bash
+ansible 'machine2@192.168.84.133' \
+  -m ping \
+  --become \
+  --ask-become-pass
+```
+
+To restore automatic alternative selection, run the following command on `machine2`:
 
 ```bash
 sudo update-alternatives --auto sudo
 ```
 
-Verify the resulting configuration before assuming which implementation is selected.
+**Important:** Changing the default alternative affects the system-wide sudo configuration. The inventory method is more targeted because it changes which executable Ansible uses for the specified host.
 
-## 6. Lessons learned
+## 5. Lessons Learned
 
 - Successful SSH connectivity does not guarantee successful privilege escalation.
-- A working manual sudo command does not necessarily prove that Ansible can handle the same authentication interaction.
-- Verbose Ansible output and system logs are valuable for narrowing down the failure.
-- Testing an alternative executable can isolate a compatibility issue without immediately changing the inventory or reinstalling packages.
-- A successful workaround should be tested before making a permanent configuration change.
-- Troubleshooting documentation should record the evidence, the commands used, the confirmed workaround, and any remaining uncertainty.
+- Manual sudo authentication can work even when Ansible's privilege-escalation process fails.
+- Verbose Ansible output and system logs help narrow down the cause of a failure.
+- Testing an alternative executable can isolate a compatibility problem without immediately changing system-wide configuration.
+- Inventory variables allow host-specific configuration without changing global Ansible settings.
+- A workaround should be tested before making permanent configuration changes.
+- Troubleshooting documentation should distinguish verified results from assumptions about the underlying software defect.
 
 ## Conclusion
 
-The issue was resolved by using `/usr/bin/sudo.ws` instead of the default `sudo-rs` implementation on Ubuntu 26.04.
+The Ansible privilege-escalation issue was resolved by configuring:
 
-The investigation showed how to troubleshoot an Ansible `--become` timeout systematically, using manual sudo tests, Ansible verbose output, system logs, and a targeted executable override.
+```ini
+ansible_become_exe=/usr/bin/sudo.ws
+```
 
-*Note: The successful workaround establishes that changing the sudo executable resolved this environment's failure. It does not, by itself, establish the precise underlying software defect in `sudo-rs` or Ansible.*
+in the inventory entry for the affected Ubuntu 26.04 host.
+
+Using the traditional sudo executable allowed Ansible to execute tasks with elevated privileges successfully.
+
+An alternative approach is to change the system-wide sudo alternative on the managed host, so Ansible can use the traditional executable without a host-specific inventory setting.
+
+The successful workaround demonstrated a compatibility issue involving Ansible's privilege-escalation process and the default `sudo-rs` implementation in this environment. The precise underlying software defect was not independently established.
